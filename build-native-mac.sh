@@ -259,7 +259,7 @@ JAVASCRIPT
     MAIN_JS="$APP_NW/js/main.js"
     PATCHED_MAIN="$BUILD_TMP/main.js"
     if ! awk -v save_hook="$SAVE_HOOK" '
-        !inserted && $0 ~ /^[[:space:]]*window\.onload = function\(\) \{/ {
+        !inserted && $0 ~ /^[[:space:]]*window\.onload[[:space:]]*=[[:space:]]*function[[:space:]]*\(\)[[:space:]]*\{/ {
             sub(/\r$/, "", $0)
             print $0
             while ((getline hook_line < save_hook) > 0) {
