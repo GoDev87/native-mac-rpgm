@@ -15,9 +15,25 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 GAME_DIR="${1:-$SCRIPT_DIR}"
 OUTPUT_APP="${2:-$GAME_DIR/$APP_NAME (Mac).app}"
 
-if [ ! -d "$GAME_DIR/www" ] || [ ! -f "$GAME_DIR/www/index.html" ]; then
-    echo "Error: '$GAME_DIR' does not look like an RPG Maker MV deployment." >&2
-    echo "Expected to find: $GAME_DIR/www/index.html" >&2
+if [ -f "$GAME_DIR/www/index.html" ]; then
+    GAME_WEB_DIR="$GAME_DIR/www"
+    GAME_LAYOUT="www"
+elif [ -f "$GAME_DIR/index.html" ] && [ -d "$GAME_DIR/js" ] && [ -d "$GAME_DIR/data" ]; then
+    GAME_WEB_DIR="$GAME_DIR"
+    GAME_LAYOUT="flat"
+else
+    echo "Error: '$GAME_DIR' does not look like an RPG Maker deployment." >&2
+    echo "Expected either $GAME_DIR/www/index.html or a flat deployment with" >&2
+    echo "$GAME_DIR/index.html, $GAME_DIR/js, and $GAME_DIR/data." >&2
+    exit 1
+fi
+
+if [ -f "$GAME_WEB_DIR/js/rmmz_managers.js" ]; then
+    RPG_MAKER_ENGINE="MZ"
+elif [ -f "$GAME_WEB_DIR/js/rpg_managers.js" ]; then
+    RPG_MAKER_ENGINE="MV"
+else
+    echo "Error: could not identify RPG Maker MV or MZ in '$GAME_WEB_DIR'." >&2
     exit 1
 fi
 
@@ -132,12 +148,41 @@ ditto "$RUNTIME_APP" "$OUTPUT_APP"
 APP_NW="$OUTPUT_APP/Contents/Resources/app.nw"
 mkdir -p "$APP_NW"
 
+echo "Copying RPG Maker $RPG_MAKER_ENGINE game data ($GAME_LAYOUT layout)..."
+if [ "$GAME_LAYOUT" = "www" ]; then
+    ditto "$GAME_WEB_DIR" "$APP_NW"
+else
+    # Windows RPG Maker deployments put the web game and NW.js runtime in the
+    # same directory. Copy the game while leaving the Windows runtime behind.
+    for source_path in "$GAME_WEB_DIR"/*; do
+        [ -e "$source_path" ] || continue
+        source_name="$(basename "$source_path")"
+
+        if [ -d "$source_path" ]; then
+            case "$source_name" in
+                Dictionaries|locales|swiftshader|*.app)
+                    continue
+                    ;;
+            esac
+        else
+            case "$source_name" in
+                package.json|build-native-mac.sh|credits.html|*.exe|*.dll|*.pak|*.dat|*.log)
+                    continue
+                    ;;
+            esac
+        fi
+
+        ditto "$source_path" "$APP_NW/$source_name"
+    done
+fi
+
 cat > "$APP_NW/package.json" <<JSON
 {
   "name": "$PACKAGE_NAME",
   "version": "$APP_VERSION",
-  "main": "www/index.html",
+  "main": "index.html",
   "js-flags": "--expose-gc",
+  "chromium-args": "--force-color-profile=srgb --disable-devtools",
   "window": {
     "title": "$APP_NAME",
     "toolbar": false,
@@ -145,24 +190,54 @@ cat > "$APP_NW/package.json" <<JSON
     "height": $WINDOW_HEIGHT,
     "position": "center",
     "resizable": true,
-    "icon": "www/icon/icon.png"
+    "icon": "icon/icon.png"
   }
 }
 JSON
 
-echo "Copying game data..."
-ditto "$GAME_DIR/www" "$APP_NW/www"
-
-# RPG Maker MV normally saves beside the game files. A signed Mac app should not
+# RPG Maker normally saves beside the game files. A signed Mac app should not
 # modify its own bundle, so this hook redirects saves to NW.js Application Support
 # and copies any existing Windows saves there on the first launch.
 SAVE_HOOK="$BUILD_TMP/mac-save-hook.js"
-cat > "$SAVE_HOOK" <<'JAVASCRIPT'
+if [ "$RPG_MAKER_ENGINE" = "MZ" ]; then
+    cat > "$SAVE_HOOK" <<'JAVASCRIPT'
+if (process.platform === "darwin" && typeof nw === "object") {
+    const fs = require("fs");
+    const path = require("path");
+    const savePath = path.join(nw.App.dataPath, "save");
+    const bundledSavePath = path.join(
+        path.dirname(process.mainModule.filename),
+        "save"
+    );
+    if (!fs.existsSync(savePath)) {
+        fs.mkdirSync(savePath, { recursive: true });
+    }
+    if (fs.existsSync(bundledSavePath)) {
+        for (const filename of fs.readdirSync(bundledSavePath)) {
+            const source = path.join(bundledSavePath, filename);
+            const destination = path.join(savePath, filename);
+            if (/\.rmmzsave$/i.test(filename) && !fs.existsSync(destination)) {
+                fs.copyFileSync(source, destination);
+            }
+        }
+    }
+    StorageManager.fileDirectoryPath = function() {
+        return savePath + path.sep;
+    };
+}
+JAVASCRIPT
+
+    cat "$SAVE_HOOK" >> "$APP_NW/js/rmmz_managers.js"
+else
+    cat > "$SAVE_HOOK" <<'JAVASCRIPT'
     if (process.platform === 'darwin') {
         var fs = require('fs');
         var path = require('path');
         var savePath = path.join(nw.App.dataPath, 'save');
-        var bundledSavePath = path.join(process.cwd(), 'www', 'save');
+        var bundledSavePath = path.join(
+            path.dirname(process.mainModule.filename),
+            'save'
+        );
         if (!fs.existsSync(savePath)) {
             fs.mkdirSync(savePath, { recursive: true });
         }
@@ -181,30 +256,31 @@ cat > "$SAVE_HOOK" <<'JAVASCRIPT'
     }
 JAVASCRIPT
 
-MAIN_JS="$APP_NW/www/js/main.js"
-PATCHED_MAIN="$BUILD_TMP/main.js"
-if ! awk -v save_hook="$SAVE_HOOK" '
-    !inserted && $0 ~ /^[[:space:]]*window\.onload = function\(\) \{/ {
-        sub(/\r$/, "", $0)
-        print $0
-        while ((getline hook_line < save_hook) > 0) {
-            print hook_line
+    MAIN_JS="$APP_NW/js/main.js"
+    PATCHED_MAIN="$BUILD_TMP/main.js"
+    if ! awk -v save_hook="$SAVE_HOOK" '
+        !inserted && $0 ~ /^[[:space:]]*window\.onload = function\(\) \{/ {
+            sub(/\r$/, "", $0)
+            print $0
+            while ((getline hook_line < save_hook) > 0) {
+                print hook_line
+            }
+            close(save_hook)
+            inserted = 1
+            next
         }
-        close(save_hook)
-        inserted = 1
-        next
-    }
-    { print }
-    END {
-        if (!inserted) {
-            exit 42
+        { print }
+        END {
+            if (!inserted) {
+                exit 42
+            }
         }
-    }
-' "$MAIN_JS" > "$PATCHED_MAIN"; then
-    echo "Error: could not find RPG Maker's window.onload hook in $MAIN_JS" >&2
-    exit 1
+    ' "$MAIN_JS" > "$PATCHED_MAIN"; then
+        echo "Error: could not find RPG Maker's window.onload hook in $MAIN_JS" >&2
+        exit 1
+    fi
+    mv "$PATCHED_MAIN" "$MAIN_JS"
 fi
-mv "$PATCHED_MAIN" "$MAIN_JS"
 
 INFO_PLIST="$OUTPUT_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_NAME" "$INFO_PLIST"
