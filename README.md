@@ -1,21 +1,38 @@
-# Native macOS builds for RPG Maker MV
+# Native macOS builds for RPG Maker MV and MZ
 
-`build-native-mac.sh` turns an RPG Maker MV deployment into a native macOS
-application. It downloads the official NW.js runtime for the Mac running the
-script, copies the game into it, redirects save files outside the signed app
-bundle, and applies an ad-hoc signature for local use.
+`build-native-mac.sh` turns an RPG Maker MV or MZ deployment into a native
+macOS application. It downloads the official NW.js SDK runtime for the Mac
+running the script, copies the game into it, redirects save files outside the
+signed app bundle, and applies an ad-hoc signature for local use.
 
 ## Requirements
 
 - macOS on Apple Silicon (`arm64`) or Intel (`x86_64`)
-- An RPG Maker MV deployment containing `www/index.html`
+- An RPG Maker MV or MZ deployment in one of the supported layouts described
+  below
 - An internet connection to download NW.js
 - The standard macOS command-line tools used by the script: `curl`, `unzip`,
   `ditto`, `codesign`, and `awk`
+- `/usr/libexec/PlistBuddy`, included with macOS
 
-The game deployment must also retain RPG Maker MV's usual
-`www/js/main.js` file. The script patches this file in the generated app to
-store saves in the user's Application Support directory.
+The script identifies the engine from `js/rpg_managers.js` (MV) or
+`js/rmmz_managers.js` (MZ). An MV deployment must also retain its usual
+`js/main.js` file because the generated copy is patched to install the save
+redirect.
+
+## Supported deployment layouts
+
+The input directory may use either of these layouts:
+
+- A standard deployment containing `www/index.html`. The contents of `www`
+  become the app's web files.
+- A flat deployment containing `index.html`, `js/`, and `data/`, as commonly
+  produced for Windows. The script copies the web game while excluding
+  Windows runtime files and directories such as `.exe`, `.dll`, `.pak`,
+  `locales`, and `swiftshader`.
+
+Pass the directory that contains `www` for the first layout, or the directory
+that contains `index.html` for the flat layout.
 
 ## Configure the app
 
@@ -39,8 +56,8 @@ WINDOW_HEIGHT=720
   reverse-domain form.
 - `WINDOW_WIDTH` and `WINDOW_HEIGHT` set the initial window size in pixels.
 
-The configured icon path is `www/icon/icon.png`, matching the default RPG Maker
-MV deployment layout.
+The generated NW.js package expects the game icon at `icon/icon.png`, matching
+the default deployment layout after the game files are copied.
 
 ## Build
 
@@ -64,8 +81,8 @@ You can instead pass the deployment directory and an optional output path:
 
 The arguments are:
 
-1. The directory containing `www/index.html`. It defaults to the directory
-   containing the script.
+1. The deployment directory in either supported layout. It defaults to the
+   directory containing the script.
 2. The destination `.app` path. It defaults to
    `<game directory>/<APP_NAME> (Mac).app`.
 
@@ -93,12 +110,19 @@ This creates a single-architecture app, not a universal binary. Running the
 script from an Intel shell under Rosetta on Apple Silicon may therefore produce
 an Intel build.
 
-RPG Maker MV normally writes saves beside the game files. Modifying a signed app
+RPG Maker normally writes saves beside the game files. Modifying a signed app
 bundle invalidates its signature, so the generated app writes saves to
-`nw.App.dataPath/save` in the user's Application Support area instead. On
-launch, any `.rpgsave` files bundled in `www/save` are copied there when a file
-with the same name does not already exist. Existing user saves are never
-overwritten by this import.
+`nw.App.dataPath/save` in the user's Application Support area instead.
+
+On launch, bundled saves are copied there when a file with the same name does
+not already exist:
+
+- MV imports `.rpgsave` files.
+- MZ imports `.rmmzsave` files.
+
+Existing user saves are never overwritten. For MV, the redirect is inserted
+into `js/main.js` at the standard `window.onload` hook. For MZ, it is appended
+to `js/rmmz_managers.js` and overrides `StorageManager.fileDirectoryPath`.
 
 ## Signing and distribution
 
@@ -109,10 +133,16 @@ notarization workflow.
 
 ## Troubleshooting
 
-### The directory does not look like an RPG Maker MV deployment
+### The directory does not look like an RPG Maker deployment
 
-Pass the deployment directory itself, not its `www` subdirectory. The expected
-file is `<deployment directory>/www/index.html`.
+For a standard deployment, pass the directory containing `www/index.html`, not
+the `www` directory itself. For a flat deployment, pass the directory containing
+`index.html`, `js/`, and `data/`.
+
+### The engine cannot be identified
+
+The deployment must contain `js/rpg_managers.js` for MV or
+`js/rmmz_managers.js` for MZ, relative to its web root.
 
 ### The output already exists
 
@@ -120,11 +150,12 @@ Move the old `.app`, remove it if it is no longer needed, or pass a different
 destination as the second argument. The script deliberately does not replace
 existing output.
 
-### The `window.onload` hook cannot be found
+### The MV `window.onload` hook cannot be found
 
-The generated deployment's `www/js/main.js` differs from the standard RPG Maker
-MV layout or has been modified. Restore the normal `window.onload = function() {`
-entry point, or adapt the save-hook insertion in the script to the custom file.
+The deployment's `js/main.js` differs from the standard RPG Maker MV layout or
+has been modified. Restore the normal `window.onload = function() {` entry
+point, or adapt the save-hook insertion in the script to the custom file. This
+check does not apply to MZ.
 
 ### NW.js cannot be downloaded
 
